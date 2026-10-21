@@ -10,7 +10,10 @@ const path = require('path');
 const DATA_FILE = path.join(__dirname, 'data.json');
 const MIN_PRICE = Number(process.env.MIN_PRICE || 190000);
 const MAX_PRICE = Number(process.env.MAX_PRICE || 450000);
-const CONCURRENCY = Math.max(1, Number(process.env.SCRAPE_CONCURRENCY || 3));
+const CONCURRENCY = Math.max(1, Number(process.env.SCRAPE_CONCURRENCY || 1));
+const MAX_RETRIES = Math.max(0, Number(process.env.SCRAPE_MAX_RETRIES || 8));
+const REQUEST_DELAY_MS = Math.max(0, Number(process.env.SCRAPE_DELAY_MS || 2000));
+const DEFAULT_RETRY_DELAY_MS = Math.max(1000, Number(process.env.SCRAPE_RETRY_DELAY_MS || 30000));
 
 function getTargetUrls() {
   const urls = [];
@@ -69,13 +72,57 @@ function parseProperties(html, sourceUrl) {
   return properties;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRetryDelayMs(response, html, attempt) {
+  const retryAfter = response?.headers()?.['retry-after'];
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) return Math.max(1000, seconds * 1000);
+
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.max(1000, date - Date.now());
+  }
+
+  const bodyMatch = html?.match(/retry\s+after\s+(\d+)/i);
+  if (bodyMatch) return Math.max(1000, Number(bodyMatch[1]) * 1000);
+  return Math.min(DEFAULT_RETRY_DELAY_MS * (attempt + 1), 5 * 60 * 1000);
+}
+
 async function scrapeUrl(browser, url) {
   const page = await browser.newPage();
   try {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-    return parseProperties(await page.content(), url);
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        const html = await page.content();
+        const status = response?.status();
+        const retryable = status === 429 || (status >= 500 && status <= 599) ||
+          /too many requests/i.test(html);
+
+        if (!retryable) {
+          if (status && status >= 400) throw new Error(`HTTP ${status}`);
+          return parseProperties(html, url);
+        }
+        if (attempt === MAX_RETRIES) {
+          throw new Error(`HTTP ${status || 429}: doseženo največje število ponovnih poskusov`);
+        }
+
+        const delayMs = getRetryDelayMs(response, html, attempt);
+        console.warn(`HTTP ${status || 429} za ${url}; ponovni poskus ${attempt + 1}/${MAX_RETRIES} čez ${Math.ceil(delayMs / 1000)} s.`);
+        await sleep(delayMs);
+      } catch (error) {
+        if (/^HTTP \d+/.test(error.message) || attempt === MAX_RETRIES) throw error;
+        const delayMs = Math.min(DEFAULT_RETRY_DELAY_MS * (attempt + 1), 5 * 60 * 1000);
+        console.warn(`Začasna napaka za ${url}: ${error.message}; ponovni poskus ${attempt + 1}/${MAX_RETRIES} čez ${Math.ceil(delayMs / 1000)} s.`);
+        await sleep(delayMs);
+      }
+    }
   } finally {
     await page.close();
   }
@@ -91,6 +138,9 @@ async function scrapeAllUrls(browser) {
         results.push(...await scrapeUrl(browser, url));
       } catch (error) {
         console.error(`Napaka pri preverjanju ${url}:`, error.message);
+      }
+      if (nextIndex < TARGET_URLS.length && REQUEST_DELAY_MS > 0) {
+        await sleep(REQUEST_DELAY_MS);
       }
     }
   }
