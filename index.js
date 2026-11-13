@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const DATA_FILE = path.join(__dirname, 'data.json');
 const MIN_PRICE = Number(process.env.MIN_PRICE || 190000);
-const MAX_PRICE = Number(process.env.MAX_PRICE || 450000);
+const MAX_PRICE = Number(process.env.MAX_PRICE || 400000);
 const CONCURRENCY = Math.max(1, Number(process.env.SCRAPE_CONCURRENCY || 1));
 const MAX_RETRIES = Math.max(0, Number(process.env.SCRAPE_MAX_RETRIES || 8));
 const REQUEST_DELAY_MS = Math.max(0, Number(process.env.SCRAPE_DELAY_MS || 2000));
@@ -198,4 +198,5 @@ async function checkWebsite() {
 cron.schedule('*/5 * * * *', checkWebsite);
 
 console.log(`Real estate bot is running (${TARGET_URLS.length} filtrov).`);
+console.log(`URLS: ${TARGET_URLS}`);
 checkWebsite();
